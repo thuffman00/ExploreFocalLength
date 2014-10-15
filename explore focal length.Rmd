@@ -1,0 +1,191 @@
+---
+title: "Exploring Focal Length with exiftool and R"
+output:
+  html_document:
+    keep_md: yes
+---
+
+A good way to understand your shooting style and guide your future camera equipment buying decisions will be to explore how you use lens and discover your frequently used focal lengths.
+
+In this post, we are going to explore focal length usage with the flexible exiftool and R. exiftool, which is built using Perl and is available on Windows, Mac OS X and Linux, is used for extracting required EXIF information of your photos. Meanwhile R, is used to perform exploratory data analysis and visualization. R is also available on Windows, MAC OS X and Linux.
+
+## Requirements
+
+You will need to have the following installed:  
+1. [exiftool](http://www.sno.phy.queensu.ca/~phil/exiftool/) by Phil Harvey.  
+2. [R](http://www.r-project.org/) Environment.  
+3. Various additional R packages, which will be described later.  
+4. (Optional) For development, editing and testing, you may want to use [Rstudio](http://www.rstudio.com/products/rstudio/download/), which is a free and open source IDE.
+
+## Extracting and reading EXIF data
+
+1\. We shall invoke the exiftool from R using the `system2` command. exiftool is capable of extracting a wide range of metadata from photos. We shall only extract common EXIF information and some additional EXIF tags for our purpose in addition to demonstrating the tool’s usage. For further details, please visit the [documentation](http://www.sno.phy.queensu.ca/~phil/exiftool/exiftool_pod.html)  
+2\. We will be stating the focal length in terms of 35mm film format (or ‘full frame’ format) allowing us to view our usage across several camera devices (for example smartphones, DSLRs, Mirrorless Cameras, Point-and-Shoot, etc) - which is very common nowadays - with a standard benchmark.  
+3\. The extracted information will be saved in a tabluar format by exiftool to a CSV file named “photodata.csv" for easy reading into R.  
+4\. Replace the filepath below `d:/docs/photos` accordingly based on your system OS and location of the photos.  
+5\. Please note that the code below performs a recursive search (switch `-r`) on subdirectories.  
+
+```{r DataExtract, cache=TRUE}
+## Replace the file path below accordingly
+## exiftool is assumed to be accessible from configured the system path
+system2("exiftool", args="-common -ScaleFactor35efl -FocalLengthIn35mmFormat -FNumber -DateTimeOriginal -FileType -csv -t -r d:/docs/photos",stdout="photodata.csv")
+```
+
+6\. Data is then read into R.
+
+```{r DataRead, cache=TRUE}
+data <- read.csv("photodata.csv")
+```
+
+## Data Processing
+
+# Exploring Data
+After checking that the required EXIF fields are extracted properly with the `names` command, we proceed to explore the nature of our data. It seems that there are invalid (NA) values that warrants further exploration. For my case, I also have multiple file types that needed filtering.
+
+```{r CheckData, message=FALSE}
+library(dplyr)
+data <- tbl_df(data) # change to local data frame for nice printing
+names(data)
+table(complete.cases(data))
+unique(data$FileType)
+```
+
+# Cleaning Data
+
+After further exploration, data cleaning is deemed necessary. Please note that your situation might differ significantly.  
+
+1\. In addition to file type, I also have alot of camera models in my data. Filtering to commonly used cameras is needed.  
+
+```{r FilterData}
+## filter data
+dataFocal <- data %>%
+            filter(FileType=="JPEG", Model %in% c(
+"Canon PowerShot A540","iPhone 4S","iPhone 5s","DMC-LX5","NIKON D7000","X100S") ) %>%
+            select(FocalLength,ScaleFactor35efl,FocalLengthIn35mmFormat,DateTimeOriginal)
+```
+
+2\. Not all cameras populate the `FocalLengthIn35mmFormat` tag, so we have to manually compute using the 35mm equivalent focal length variables. A new variable `FocalLengthUsed` is created: If a record has `FocalLengthIn35mmFormat` available, we shall use the value, otherwise `FocalLength * ScaleFactor35efl` is calculated and used.  
+3\. __Please note:__ As per the [exiftool documentation](http://www.sno.phy.queensu.ca/~phil/exiftool/TagNames/Composite.html), any resized images will lead to inaccurate values reported in `ScaleFactor35efl`, thus `FocalLengthUsed` might have inaccuracies included.  
+
+```{r CleanData}
+## clean data
+library(lubridate)
+library(stringr)
+
+# convert timestamp to R Date format and set proper timezone
+dataFocal$DateTimeOriginal <- dataFocal$DateTimeOriginal %>% 
+                                ymd_hms() %>%
+                                force_tz(., tzone="Singapore")
+
+dataFocal <- dataFocal %>%
+                mutate(FocalLength = as.character(FocalLength),
+                       ScaleFactor35efl = as.character(ScaleFactor35efl),
+                       FocalLengthIn35mmFormat = as.character(FocalLengthIn35mmFormat))
+
+# remove "mm" string and trim whitespaces
+dataFocal <- dataFocal %>%
+                mutate(FocalLength = str_trim(str_replace(FocalLength,"mm","")),
+                       ScaleFactor35efl = str_trim(str_replace(ScaleFactor35efl,"mm","")),
+                       FocalLengthIn35mmFormat = str_trim(str_replace(FocalLengthIn35mmFormat,"mm","")))
+
+dataFocal <- dataFocal %>%
+                mutate(FocalLength = as.numeric(FocalLength),
+                       ScaleFactor35efl = as.numeric(ScaleFactor35efl),
+                       FocalLengthIn35mmFormat = as.numeric(FocalLengthIn35mmFormat))
+
+# Derive new variable FocalLengthUsed
+dataFocal <- dataFocal %>%
+                mutate(FocalLengthUsed=ifelse(is.na(FocalLengthIn35mmFormat),round(FocalLength*ScaleFactor35efl),FocalLengthIn35mmFormat))
+
+```
+
+## Visualizing focal length usage
+
+Let's create a bar chart to view our focal length usage. Let us also group the focal lengths into common lens types (by focal length) that you see in photography articles and books.  
+
+As there is a lack of a standard category of lens types by focal length, we shall use the definition introduced by this [article](http://cameras.about.com/od/advanceddigitalcameras/tp/types-of-camera-lenses.htm).  
+
+| Lens Type  | Focal Length Range (mm) |
+|------------|-------------------------|
+| Wide Angle | 0 to 34                 |
+| Normal     | 35 to 79                |
+| Portrait   | 80 to 134               |
+| Telephoto  | 135 and above           |
+
+```{r DataVis1, message=FALSE}
+library(Hmisc)
+# Set Lens Type definition and derive range in data
+# Wide: 0 to 34 mm
+# normal: 35 to 79 mm
+# portrait: 80 to 134 mm
+# telephoto: 135 mm and above
+lensType=cut2(dataFocal$FocalLengthUsed,c(35,80,135))
+levels(lensType) <- c("Wide","Normal","Portrait","Telephoto")
+
+library(ggplot2)
+
+# plot bar chart
+ggplot(dataFocal,aes(factor(FocalLengthUsed),fill=lensType)) +
+    geom_bar() +
+    stat_bin(binwidth=1) +
+    scale_x_discrete(breaks=seq(round(min(dataFocal$FocalLengthUsed),digits=-1), round(max(dataFocal$FocalLengthUsed),digits=-1), 1)) +
+    theme(axis.text.x = element_text(angle = 90,
+                                      hjust = 0.5, vjust = 0.5),
+          legend.position="bottom") +
+    labs(title="Focal Length Usage", x = "Focal Length (mm)", y = "Count of Shots", fill="Lens Type") +
+    scale_fill_brewer(type = "div", palette = "RdYlBu")
+```
+
+From the bar chart above, it can be seen that I mostly shoot with normal angle lenses, with particular preference for the 35mm lens.
+
+Let us now look that the top 10 focal lengths I have used.  
+
+```{r top10}
+dataFocal %>%
+    group_by(FocalLengthUsed) %>%
+    summarise(FocalLengthUsed_count = n()) %>%
+    top_n(10) %>%
+    arrange(desc(FocalLengthUsed_count))
+```
+
+Like what the bar chart has shown, my top preference is the 35mm, followed by wide and normal lenses and finally portrait and telephoto lenses.
+
+We can also explore how our shooting habits change. Let's see how mine changed in the past 3 years.
+
+
+```{r DataVis2}
+## Derive new variable "Year" and filter years 2012 to 2014
+dataFocalByYear <- dataFocal %>%
+                mutate(Year=year(DateTimeOriginal)) %>%
+                filter(Year>=2012)
+
+# Set Lens Type definition and derive range in data
+# Wide: 0 to 34 mm
+# normal: 35 to 79 mm
+# portrait: 80 to 134 mm
+# telephoto: 135 mm and above
+lensType=cut2(dataFocalByYear$FocalLengthUsed,c(35,80,135))
+levels(lensType) <- c("Wide","Normal","Portrait","Telephoto")
+
+# Plot bar chart by Year
+ggplot(dataFocalByYear,aes(factor(FocalLengthUsed),fill=lensType)) +
+    geom_bar() +
+    stat_bin(binwidth=1) +
+    facet_grid(Year~.,scales="free",space="free") +
+    scale_x_discrete(breaks=seq(round(min(dataFocalByYear$FocalLengthUsed),digits=-1), round(max(dataFocalByYear$FocalLengthUsed),digits=-1), 1)) +
+    theme(axis.text.x = element_text(angle = 90,
+                                      hjust = 0.5, vjust = 0.5),
+          strip.background = element_rect(fill="#ffffbf"),
+          strip.text = element_text(face="bold"),
+          legend.position="bottom") +
+     labs(title="Focal Length Usage (2012-2014)", x = "Focal Length (mm)", y = "Count of Shots", fill="Lens Type") +
+    scale_fill_brewer(type = "div", palette = "RdYlBu")
+```
+
+It can be seen that I shot mostly with normal lenses and tried out wide, portrait and telephoto ranges in 2012. Over these 3 years, my style progressively shifted to shooting with wide and normal lenes.
+
+The 34mm result in 2014 is sort of surprising as it should be attributed to the 35mm lens that I use. It could be due to the resizing of images as discussed earlier.
+
+It is worth to point out again that we are using the 35mm Format to standardize results. Therefore if you are shooting a 35mm lens with a crop sensor camera like Nikon D7000, you will get more counts on the 52mm focal length.
+
+I hope you like this post, which is just one example demonstrating that there are a lot of data sets in our everyday lives that can be explored, allowing us to understand more of ourselves and act on them.
